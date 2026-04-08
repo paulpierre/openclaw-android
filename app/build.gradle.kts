@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "ai.openclaw.enhanced"
-        minSdk = 26
+        minSdk = 33
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -39,6 +39,7 @@ android {
     
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 
@@ -62,6 +63,9 @@ dependencies {
     
     // Logging
     implementation("com.jakewharton.timber:timber:5.0.1")
+
+    // BouncyCastle for Ed25519 (platform Ed25519 unreliable on Samsung)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

@@ -67,19 +67,29 @@ class InputController(private val context: Context) {
             
             Timber.i("Inputting text: ${params.text}")
             
-            // If clearFirst is true, clear the field first
+            // If clearFirst is true, select all text in the focused node via ACTION_SET_SELECTION
             if (params.clearFirst) {
-                accessibilityService.performGlobalAction(AccessibilityService.GLOBAL_ACTION_SELECT_ALL)
+                val selectNode = accessibilityService.rootInActiveWindow
+                    ?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+                if (selectNode != null) {
+                    val args = android.os.Bundle().apply {
+                        putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                        putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, Int.MAX_VALUE)
+                    }
+                    selectNode.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+                }
                 Thread.sleep(100)
             }
-            
+
             // Use clipboard to input text (more reliable than key events)
             val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
             val clipData = android.content.ClipData.newPlainText("openclaw_input", params.text)
             clipboardManager.setPrimaryClip(clipData)
-            
-            // Paste the text
-            val pasteSuccess = accessibilityService.performGlobalAction(AccessibilityService.GLOBAL_ACTION_PASTE)
+
+            // Paste the text via the focused accessibility node using ACTION_PASTE
+            val focusedNode = accessibilityService.rootInActiveWindow
+                ?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+            val pasteSuccess = focusedNode?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE) ?: false
             
             if (pasteSuccess) {
                 Timber.i("Successfully input text: ${params.text}")

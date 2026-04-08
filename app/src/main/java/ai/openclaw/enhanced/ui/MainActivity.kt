@@ -83,7 +83,13 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun isAccessibilityServiceEnabled(): Boolean {
-        return EnhancedAccessibilityService.getInstance() != null
+        // Check system settings directly — getInstance() can be null when service
+        // runs in a different process context (common on Samsung devices)
+        val enabledServices = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val serviceName = "$packageName/${EnhancedAccessibilityService::class.java.canonicalName}"
+        return enabledServices.contains(serviceName)
     }
     
     private fun isNodeServiceRunning(): Boolean {

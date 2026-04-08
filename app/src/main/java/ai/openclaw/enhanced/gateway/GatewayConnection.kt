@@ -1,10 +1,19 @@
+// ===========================================================================
+// GatewayConnection.kt
+// ai/openclaw/enhanced/gateway/GatewayConnection.kt
+//
+// Manages the WebSocket connection to the OpenClaw gateway.
+// Implements the v3 protocol: challenge -> Ed25519 sign -> connect -> handle
+// commands via node.invoke.request / node.invoke.result frames.
+// ===========================================================================
+
 package ai.openclaw.enhanced.gateway
 
 import android.content.Context
+import android.os.Build
 import ai.openclaw.enhanced.controller.AppController
 import ai.openclaw.enhanced.controller.InputController
 import ai.openclaw.enhanced.controller.UIController
-import ai.openclaw.enhanced.model.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -15,6 +24,9 @@ import org.java_websocket.handshake.ServerHandshake
 import timber.log.Timber
 import java.net.URI
 import java.util.UUID
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
+import java.security.KeyStore
 
 class GatewayConnection(
     private val context: Context,
@@ -24,238 +36,249 @@ class GatewayConnection(
     private val scope: CoroutineScope
 ) {
     companion object {
-        private const val DEFAULT_GATEWAY_HOST = "127.0.0.1"
-        private const val DEFAULT_GATEWAY_PORT = 18789
-        private const val NODE_DISPLAY_NAME = "Samsung A25 Enhanced"
-        private const val NODE_VERSION = "1.0.0"
+        private const val GATEWAY_HOST = "superhuman-vps.zebra-trench.ts.net"
+        private const val GATEWAY_PORT = 18789
+        private const val GATEWAY_TOKEN = "179b5c4b69db4bc4d39fa87afc86896267c42de4ef929642"
+        private const val USE_TLS = true
+        private const val CLIENT_ID = "openclaw-android"
+        private const val CLIENT_VERSION = "1.0.0"
+        private const val DISPLAY_NAME = "Samsung A25 Enhanced"
+        private const val PROTOCOL_VERSION = 3
+        private const val RECONNECT_DELAY_MS = 5000L
     }
-    
+
     private var webSocketClient: WebSocketClient? = null
     private val json = Json { ignoreUnknownKeys = true }
-    
+    private val identityStore = DeviceIdentityStore(context)
+    private val dispatcher = CommandDispatcher(appController, inputController, uiController)
+
+    // The node ID is our device identity (SHA-256 hex of Ed25519 public key)
+    private val nodeId: String = identityStore.getDeviceId()
+
     fun connect() {
         scope.launch(Dispatchers.IO) {
             try {
-                val gatewayUrl = "ws://$DEFAULT_GATEWAY_HOST:$DEFAULT_GATEWAY_PORT"
-                Timber.i("Connecting to OpenClaw Gateway: $gatewayUrl")
-                
-                val uri = URI(gatewayUrl)
+                val protocol = if (USE_TLS) "wss" else "ws"
+                val url = "$protocol://$GATEWAY_HOST:$GATEWAY_PORT/"
+                Timber.i("Connecting to OpenClaw Gateway: $url")
+
+                val uri = URI(url)
                 webSocketClient = createWebSocketClient(uri)
+
+                if (USE_TLS) {
+                    val sslContext = SSLContext.getInstance("TLS")
+                    val tmf = TrustManagerFactory.getInstance(
+                        TrustManagerFactory.getDefaultAlgorithm()
+                    )
+                    tmf.init(null as KeyStore?)
+                    sslContext.init(null, tmf.trustManagers, null)
+                    webSocketClient?.setSocketFactory(sslContext.socketFactory)
+                }
+
                 webSocketClient?.connect()
-                
             } catch (e: Exception) {
                 Timber.e(e, "Failed to connect to Gateway")
             }
         }
     }
-    
+
     fun disconnect() {
-        webSocketClient?.close()
-        webSocketClient = null
+        val client = webSocketClient
+        webSocketClient = null // Mark as intentionally disconnected
+        client?.close()
         Timber.i("Disconnected from OpenClaw Gateway")
     }
-    
+
+    // -----------------------------------------------------------------------
+    // WebSocket lifecycle
+    // -----------------------------------------------------------------------
+
     private fun createWebSocketClient(uri: URI): WebSocketClient {
         return object : WebSocketClient(uri) {
             override fun onOpen(handshake: ServerHandshake?) {
-                Timber.i("WebSocket connection opened to Gateway")
-                sendNodeRegistration()
+                Timber.i("WebSocket opened, waiting for challenge...")
             }
-            
+
             override fun onMessage(message: String?) {
-                message?.let { handleMessage(it) }
+                message?.let { handleRawMessage(it) }
             }
-            
+
             override fun onClose(code: Int, reason: String?, remote: Boolean) {
-                Timber.w("WebSocket connection closed: $reason (code: $code, remote: $remote)")
-                
-                // Attempt to reconnect after a delay
-                scope.launch {
-                    kotlinx.coroutines.delay(5000)
-                    if (webSocketClient == null) { // Only reconnect if not manually disconnected
-                        connect()
-                    }
-                }
+                Timber.w("WebSocket closed: $reason (code=$code, remote=$remote)")
+                scheduleReconnect()
             }
-            
+
             override fun onError(ex: Exception?) {
                 Timber.e(ex, "WebSocket error")
             }
         }
     }
-    
-    private fun sendNodeRegistration() {
-        val registrationMessage = JsonObject(mapOf(
-            "type" to JsonPrimitive("node_register"),
-            "payload" to JsonObject(mapOf(
-                "nodeId" to JsonPrimitive(getNodeId()),
-                "displayName" to JsonPrimitive(NODE_DISPLAY_NAME),
-                "version" to JsonPrimitive(NODE_VERSION),
-                "platform" to JsonPrimitive("android"),
-                "capabilities" to JsonArray(listOf(
-                    JsonPrimitive("app.launch"),
-                    JsonPrimitive("app.list"),
-                    JsonPrimitive("input.tap"),
-                    JsonPrimitive("input.text"),
-                    JsonPrimitive("input.key"),
-                    JsonPrimitive("ui.findElement"),
-                    JsonPrimitive("ui.clickElement"),
-                    JsonPrimitive("ui.getScreenContent")
-                ))
-            ))
-        ))
-        
-        sendMessage(registrationMessage)
-        Timber.i("Sent node registration")
+
+    private fun scheduleReconnect() {
+        scope.launch {
+            kotlinx.coroutines.delay(RECONNECT_DELAY_MS)
+            // Only reconnect if not intentionally disconnected
+            if (webSocketClient != null) {
+                Timber.i("Attempting reconnect...")
+                connect()
+            }
+        }
     }
-    
-    private fun handleMessage(message: String) {
+
+    // -----------------------------------------------------------------------
+    // Message routing
+    // -----------------------------------------------------------------------
+
+    private fun handleRawMessage(raw: String) {
         scope.launch {
             try {
-                val jsonMessage = json.parseToJsonElement(message).jsonObject
-                val type = jsonMessage["type"]?.jsonPrimitive?.content
-                
+                val msg = json.parseToJsonElement(raw).jsonObject
+                val type = msg["type"]?.jsonPrimitive?.content
+
                 when (type) {
-                    "node_command" -> handleNodeCommand(jsonMessage)
-                    "ping" -> handlePing(jsonMessage)
-                    else -> Timber.w("Unknown message type: $type")
+                    "event" -> handleEvent(msg)
+                    "res" -> handleResponse(msg)
+                    else -> Timber.w("Unknown frame type: $type")
                 }
-                
             } catch (e: Exception) {
-                Timber.e(e, "Failed to handle message: $message")
+                Timber.e(e, "Failed to handle message: $raw")
             }
         }
     }
-    
-    private suspend fun handleNodeCommand(message: JsonObject) {
-        val payload = message["payload"]?.jsonObject ?: return
-        val commandId = payload["id"]?.jsonPrimitive?.content ?: UUID.randomUUID().toString()
+
+    private suspend fun handleEvent(msg: JsonObject) {
+        val event = msg["event"]?.jsonPrimitive?.content ?: return
+
+        when (event) {
+            "connect.challenge" -> handleChallenge(msg)
+            "node.invoke.request" -> handleInvokeRequest(msg)
+            "tick" -> handleTick(msg)
+            else -> Timber.d("Unhandled event: $event")
+        }
+    }
+
+    private fun handleResponse(msg: JsonObject) {
+        val id = msg["id"]?.jsonPrimitive?.content
+        val ok = msg["ok"]?.jsonPrimitive?.booleanOrNull ?: false
+        if (ok) {
+            Timber.i("Response OK for request $id")
+        } else {
+            // Error can be a JsonObject or JsonPrimitive
+            val error = msg["error"]
+            Timber.w("Response FAILED for request $id: $error")
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Challenge -> Connect handshake (v3 protocol)
+    // -----------------------------------------------------------------------
+
+    private fun handleChallenge(msg: JsonObject) {
+        val payload = msg["payload"]?.jsonObject ?: return
+        val nonce = payload["nonce"]?.jsonPrimitive?.content ?: return
+        Timber.i("Received challenge with nonce: $nonce")
+
+        val signedAt = System.currentTimeMillis()
+        val deviceId = identityStore.getDeviceId()
+
+        // Build the v3 signature payload string:
+        // v3|{deviceId}|openclaw-android|node|node||{signedAtMs}|{token}|{nonce}|android|android
+        val sigPayload = "v3|$deviceId|$CLIENT_ID|node|node||$signedAt|$GATEWAY_TOKEN|$nonce|android|android"
+        val signature = identityStore.sign(sigPayload)
+
+        // Build the connect request frame
+        val connectReq = buildJsonObject {
+            put("type", "req")
+            put("id", UUID.randomUUID().toString())
+            put("method", "connect")
+            putJsonObject("params") {
+                put("minProtocol", PROTOCOL_VERSION)
+                put("maxProtocol", PROTOCOL_VERSION)
+                putJsonObject("client") {
+                    put("id", CLIENT_ID)
+                    put("displayName", DISPLAY_NAME)
+                    put("version", CLIENT_VERSION)
+                    put("platform", "android")
+                    put("mode", "node")
+                    put("instanceId", nodeId)
+                    put("deviceFamily", "Android")
+                    put("modelIdentifier", "${Build.MANUFACTURER} ${Build.MODEL}")
+                }
+                put("role", "node")
+                putJsonArray("scopes") {}
+                putJsonArray("caps") { add("system") }
+                putJsonArray("commands") {
+                    add("app.launch"); add("app.list")
+                    add("input.tap"); add("input.text"); add("input.key")
+                    add("ui.findElement"); add("ui.clickElement"); add("ui.getScreenContent")
+                }
+                putJsonObject("permissions") {}
+                putJsonObject("auth") { put("token", GATEWAY_TOKEN) }
+                putJsonObject("device") {
+                    put("id", deviceId)
+                    put("publicKey", identityStore.getPublicKeyBase64Url())
+                    put("signature", signature)
+                    put("signedAt", signedAt)
+                    put("nonce", nonce)
+                }
+                put("locale", "en-US")
+                put("userAgent", "$CLIENT_ID/$CLIENT_VERSION (Android ${Build.VERSION.RELEASE}; SDK ${Build.VERSION.SDK_INT})")
+            }
+        }
+
+        sendFrame(connectReq)
+        Timber.i("Sent connect request with signed challenge")
+    }
+
+    // -----------------------------------------------------------------------
+    // Command handling: node.invoke.request -> node.invoke.result
+    // -----------------------------------------------------------------------
+
+    private suspend fun handleInvokeRequest(msg: JsonObject) {
+        val payload = msg["payload"]?.jsonObject ?: return
+        val invokeId = payload["id"]?.jsonPrimitive?.content ?: return
         val command = payload["command"]?.jsonPrimitive?.content ?: return
-        val params = payload["params"]
-        
-        Timber.i("Handling command: $command (id: $commandId)")
-        
-        val result = when (command) {
-            "app.launch" -> {
-                val launchParams = if (params != null) {
-                    json.decodeFromJsonElement<AppLaunchParams>(params)
-                } else {
-                    return sendErrorResponse(commandId, "Missing launch parameters")
-                }
-                appController.launchApp(launchParams)
-            }
-            
-            "app.list" -> {
-                appController.getInstalledApps()
-            }
-            
-            "input.tap" -> {
-                val tapParams = if (params != null) {
-                    json.decodeFromJsonElement<InputTapParams>(params)
-                } else {
-                    return sendErrorResponse(commandId, "Missing tap parameters")
-                }
-                inputController.performTap(tapParams)
-            }
-            
-            "input.text" -> {
-                val textParams = if (params != null) {
-                    json.decodeFromJsonElement<InputTextParams>(params)
-                } else {
-                    return sendErrorResponse(commandId, "Missing text parameters")
-                }
-                inputController.inputText(textParams)
-            }
-            
-            "input.key" -> {
-                val keyParams = if (params != null) {
-                    json.decodeFromJsonElement<InputKeyParams>(params)
-                } else {
-                    return sendErrorResponse(commandId, "Missing key parameters")
-                }
-                inputController.sendKeyEvent(keyParams)
-            }
-            
-            "ui.findElement" -> {
-                val findParams = if (params != null) {
-                    json.decodeFromJsonElement<FindElementParams>(params)
-                } else {
-                    return sendErrorResponse(commandId, "Missing find parameters")
-                }
-                uiController.findElement(findParams)
-            }
-            
-            "ui.clickElement" -> {
-                val description = params?.jsonObject?.get("description")?.jsonPrimitive?.content
-                    ?: return sendErrorResponse(commandId, "Missing element description")
-                uiController.clickElement(description)
-            }
-            
-            "ui.getScreenContent" -> {
-                uiController.getScreenContent()
-            }
-            
-            else -> {
-                JsonObject(mapOf(
-                    "success" to JsonPrimitive(false),
-                    "error" to JsonPrimitive("Unknown command: $command")
-                ))
+        val paramsJSON = payload["paramsJSON"]?.jsonPrimitive?.content
+
+        Timber.i("Invoke request: $command (id=$invokeId)")
+
+        // Dispatch the command to the appropriate controller
+        val result = dispatcher.dispatch(command, paramsJSON)
+        val ok = result["success"]?.jsonPrimitive?.booleanOrNull ?: false
+
+        // Send the result back as a node.invoke.result request frame
+        val resultFrame = buildJsonObject {
+            put("type", "req")
+            put("id", UUID.randomUUID().toString())
+            put("method", "node.invoke.result")
+            putJsonObject("params") {
+                put("id", invokeId)
+                put("nodeId", nodeId)
+                put("ok", ok)
+                put("payloadJSON", json.encodeToString(result))
             }
         }
-        
-        sendCommandResponse(commandId, result)
+
+        sendFrame(resultFrame)
+        Timber.i("Sent invoke result for $command (ok=$ok)")
     }
-    
-    private fun handlePing(message: JsonObject) {
-        val payload = message["payload"]?.jsonObject ?: JsonObject(emptyMap())
-        val pongMessage = JsonObject(mapOf(
-            "type" to JsonPrimitive("pong"),
-            "payload" to payload
-        ))
-        sendMessage(pongMessage)
+
+    // -----------------------------------------------------------------------
+    // Keepalive
+    // -----------------------------------------------------------------------
+
+    private fun handleTick(msg: JsonObject) {
+        val ts = msg["payload"]?.jsonObject?.get("ts")?.jsonPrimitive?.longOrNull
+        Timber.d("Tick received: ts=$ts")
     }
-    
-    private fun sendCommandResponse(commandId: String, result: JsonObject) {
-        val response = JsonObject(mapOf(
-            "type" to JsonPrimitive("node_response"),
-            "payload" to JsonObject(mapOf(
-                "id" to JsonPrimitive(commandId),
-                "result" to result,
-                "timestamp" to JsonPrimitive(System.currentTimeMillis())
-            ))
-        ))
-        
-        sendMessage(response)
-    }
-    
-    private fun sendErrorResponse(commandId: String, error: String) {
-        val response = JsonObject(mapOf(
-            "type" to JsonPrimitive("node_response"),
-            "payload" to JsonObject(mapOf(
-                "id" to JsonPrimitive(commandId),
-                "result" to JsonObject(mapOf(
-                    "success" to JsonPrimitive(false),
-                    "error" to JsonPrimitive(error)
-                )),
-                "timestamp" to JsonPrimitive(System.currentTimeMillis())
-            ))
-        ))
-        
-        sendMessage(response)
-    }
-    
-    private fun sendMessage(message: JsonObject) {
-        val messageString = json.encodeToString(message)
-        webSocketClient?.send(messageString)
-        Timber.d("Sent message: $messageString")
-    }
-    
-    private fun getNodeId(): String {
-        // Generate a unique node ID based on device characteristics
-        val androidId = android.provider.Settings.Secure.getString(
-            context.contentResolver,
-            android.provider.Settings.Secure.ANDROID_ID
-        )
-        return "enhanced-node-$androidId"
+
+    // -----------------------------------------------------------------------
+    // Sending
+    // -----------------------------------------------------------------------
+
+    private fun sendFrame(frame: JsonObject) {
+        val raw = json.encodeToString(frame)
+        webSocketClient?.send(raw)
+        Timber.d("Sent frame: $raw")
     }
 }

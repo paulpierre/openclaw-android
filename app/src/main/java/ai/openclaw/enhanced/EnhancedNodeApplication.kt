@@ -1,6 +1,7 @@
 package ai.openclaw.enhanced
 
 import android.app.Application
+import ai.openclaw.enhanced.BuildConfig
 import timber.log.Timber
 
 class EnhancedNodeApplication : Application() {
