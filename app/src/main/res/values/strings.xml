@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenClaw Enhanced</string>
+    
+    <!-- Accessibility Service -->
+    <string name="accessibility_service_name">OpenClaw Enhanced Node</string>
+    <string name="accessibility_service_description">Allows OpenClaw to control other apps for automation</string>
+    
+    <!-- Notifications -->
+    <string name="notification_title">OpenClaw Enhanced Node</string>
+    <string name="notification_text">Connected to OpenClaw Gateway</string>
+    
+    <!-- Errors -->
+    <string name="error_accessibility_required">Accessibility service is required for app automation</string>
+    <string name="error_overlay_required">Overlay permission is required for UI automation</string>
+    <string name="error_connection_failed">Failed to connect to OpenClaw Gateway</string>
+    
+    <!-- Status -->
+    <string name="status_connected">Connected to Gateway</string>
+    <string name="status_disconnected">Disconnected from Gateway</string>
+    <string name="status_connecting">Connecting to Gateway...</string>
+</resources>
