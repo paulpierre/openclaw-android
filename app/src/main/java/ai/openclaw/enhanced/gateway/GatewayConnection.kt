@@ -206,11 +206,41 @@ class GatewayConnection(
                 }
                 put("role", "node")
                 putJsonArray("scopes") {}
-                putJsonArray("caps") { add("system") }
+                // All OpenClaw capability categories
+                putJsonArray("caps") {
+                    add("system"); add("canvas"); add("camera")
+                    add("screen"); add("location"); add("sms")
+                    add("device"); add("notifications"); add("contacts")
+                    add("calendar"); add("photos"); add("motion")
+                }
                 putJsonArray("commands") {
+                    // Canvas
+                    add("canvas.snapshot"); add("canvas.present"); add("canvas.hide")
+                    add("canvas.navigate"); add("canvas.eval")
+                    add("canvas.a2ui.push"); add("canvas.a2ui.reset")
+                    // Camera
+                    add("camera.list"); add("camera.snap"); add("camera.clip")
+                    // Screen
+                    add("screen.record")
+                    // System
+                    add("system.run"); add("system.notify"); add("system.which")
+                    add("system.execApprovals.get"); add("system.execApprovals.set")
+                    // Location, SMS
+                    add("location.get"); add("sms.send")
+                    // Device & personal data (Android)
+                    add("device.status"); add("device.info")
+                    add("device.permissions"); add("device.health")
+                    add("notifications.list"); add("notifications.actions")
+                    add("photos.latest")
+                    add("contacts.search"); add("contacts.add")
+                    add("calendar.events"); add("calendar.add")
+                    add("motion.activity"); add("motion.pedometer")
+                    add("app.update")
+                    // Custom enhanced UI automation commands
                     add("app.launch"); add("app.list")
                     add("input.tap"); add("input.text"); add("input.key")
-                    add("ui.findElement"); add("ui.clickElement"); add("ui.getScreenContent")
+                    add("ui.findElement"); add("ui.clickElement")
+                    add("ui.getScreenContent")
                 }
                 putJsonObject("permissions") {}
                 putJsonObject("auth") { put("token", GATEWAY_TOKEN) }
