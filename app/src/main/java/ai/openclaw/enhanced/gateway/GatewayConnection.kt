@@ -206,9 +206,9 @@ class GatewayConnection(
                 }
                 put("role", "node")
                 putJsonArray("scopes") {}
-                // All OpenClaw capability categories
+                // All OpenClaw capability categories (exec required for system.run)
                 putJsonArray("caps") {
-                    add("system"); add("canvas"); add("camera")
+                    add("system"); add("exec"); add("canvas"); add("camera")
                     add("screen"); add("location"); add("sms")
                     add("device"); add("notifications"); add("contacts")
                     add("calendar"); add("photos"); add("motion")
@@ -242,7 +242,9 @@ class GatewayConnection(
                     add("ui.findElement"); add("ui.clickElement")
                     add("ui.getScreenContent")
                 }
-                putJsonObject("permissions") {}
+                putJsonObject("permissions") {
+                    put("exec", true)
+                }
                 putJsonObject("auth") { put("token", GATEWAY_TOKEN) }
                 putJsonObject("device") {
                     put("id", deviceId)
