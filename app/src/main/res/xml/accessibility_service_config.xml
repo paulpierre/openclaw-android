@@ -9,4 +9,5 @@
     android:canRetrieveWindowContent="true"
     android:canRequestTouchExplorationMode="true"
     android:canRequestFilterKeyEvents="true"
-    android:canPerformGestures="true" />
+    android:canPerformGestures="true"
+    android:canTakeScreenshot="true" />

@@ -4,6 +4,9 @@
 //
 // Routes incoming node.invoke.request commands to the appropriate controller.
 // Supports all standard OpenClaw node commands + custom UI automation commands.
+//
+// Privileged shell commands (screencap, uiautomator) are routed through
+// ShellCommandRouter which delegates to AccessibilityService APIs.
 // ===========================================================================
 
 package ai.openclaw.enhanced.gateway
@@ -12,6 +15,7 @@ import ai.openclaw.enhanced.controller.AppController
 import ai.openclaw.enhanced.controller.InputController
 import ai.openclaw.enhanced.controller.UIController
 import ai.openclaw.enhanced.model.*
+import ai.openclaw.enhanced.service.EnhancedAccessibilityService
 import kotlinx.serialization.json.*
 import timber.log.Timber
 
@@ -21,6 +25,7 @@ class CommandDispatcher(
     private val uiController: UIController
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val shellRouter = ShellCommandRouter(uiController)
 
     /**
      * Dispatches a command to the right controller. Returns a JsonObject result.
@@ -69,10 +74,9 @@ class CommandDispatcher(
                 }
                 "ui.getScreenContent" -> uiController.getScreenContent()
 
-                // --- Canvas (maps to UI/screenshot capabilities) ---
-                "canvas.snapshot" -> uiController.getScreenContent()
+                // --- Canvas ---
+                "canvas.snapshot" -> handleCanvasSnapshot()
                 "canvas.navigate" -> {
-                    // Navigate = launch URL in browser
                     val parsed = parseJsonObject(paramsJSON)
                     val url = parsed?.get("url")?.jsonPrimitive?.content
                         ?: return errorResult("Missing url parameter")
@@ -80,7 +84,6 @@ class CommandDispatcher(
                         packageName = "com.android.chrome",
                         waitForLaunch = true
                     ))
-                    // Use system.run to open URL
                     successResult("Launched browser for: $url")
                 }
                 "canvas.eval", "canvas.present", "canvas.hide",
@@ -102,14 +105,7 @@ class CommandDispatcher(
                     val parsed = parseJsonObject(paramsJSON)
                     val cmd = parsed?.get("command")?.jsonPrimitive?.content
                         ?: return errorResult("Missing command parameter")
-                    val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-                    val output = process.inputStream.bufferedReader().readText()
-                    val exitCode = process.waitFor()
-                    buildJsonObject {
-                        put("success", true)
-                        put("exitCode", exitCode)
-                        put("stdout", output.take(4096))
-                    }
+                    shellRouter.execute(cmd)
                 }
                 "system.which" -> {
                     val parsed = parseJsonObject(paramsJSON)
@@ -119,12 +115,10 @@ class CommandDispatcher(
                     val path = process.inputStream.bufferedReader().readText().trim()
                     buildJsonObject {
                         put("success", true)
-                        put("path", path.ifEmpty { null as String? })
+                        put("path", path.ifEmpty { null })
                     }
                 }
-                "system.notify" -> {
-                    stubResult(command, "Notification acknowledged")
-                }
+                "system.notify" -> stubResult(command, "Notification acknowledged")
                 "system.execApprovals.get", "system.execApprovals.set" -> {
                     successResult("all")
                 }
@@ -165,6 +159,36 @@ class CommandDispatcher(
             errorResult("Command failed: ${e.message}")
         }
     }
+
+    // -----------------------------------------------------------------------
+    // canvas.snapshot — real screenshot with UI tree fallback
+    // -----------------------------------------------------------------------
+
+    /**
+     * Returns an actual base64 PNG screenshot via the AccessibilityService.
+     * Falls back to the UI element tree if the screenshot fails.
+     */
+    private suspend fun handleCanvasSnapshot(): JsonObject {
+        val service = EnhancedAccessibilityService.getInstance()
+        if (service != null) {
+            val base64 = service.takeScreenshotBase64()
+            if (base64 != null) {
+                return buildJsonObject {
+                    put("success", true)
+                    put("format", "png")
+                    put("encoding", "base64")
+                    put("data", base64)
+                }
+            }
+            Timber.w("canvas.snapshot: screenshot failed, falling back to UI tree")
+        }
+        // Fallback: return the accessibility UI tree
+        return uiController.getScreenContent()
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
 
     private inline fun <reified T> parseParams(paramsJSON: String?): T? {
         if (paramsJSON.isNullOrBlank()) return null
